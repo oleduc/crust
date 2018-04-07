@@ -19,20 +19,25 @@
 
 // For explanation of lint checks, run `rustc -W help` or see
 // https://github.com/maidsafe/QA/blob/master/Documentation/Rust%20Lint%20Checks.md
-#![forbid(bad_style, exceeding_bitshifts, mutable_transmutes, no_mangle_const_items,
+#![forbid(exceeding_bitshifts, mutable_transmutes, no_mangle_const_items,
           unknown_crate_types, warnings)]
-#![deny(deprecated, improper_ctypes, missing_docs,
+#![deny(bad_style, deprecated, improper_ctypes, missing_docs,
         non_shorthand_field_patterns, overflowing_literals, plugin_as_library,
         private_no_mangle_fns, private_no_mangle_statics, stable_features,
         unconditional_recursion, unknown_lints, unsafe_code, unused, unused_allocation,
         unused_attributes, unused_comparisons, unused_features, unused_parens, while_true)]
 #![warn(trivial_casts, trivial_numeric_casts, unused_extern_crates, unused_import_braces,
         unused_qualifications, unused_results)]
-#![allow(box_pointers, fat_ptr_transmutes, missing_copy_implementations,
+#![allow(box_pointers, missing_copy_implementations,
          missing_debug_implementations, variant_size_differences)]
+// FIXME: `needless_pass_by_value` and `clone_on_ref_ptr` required to make no intrusive changes
+// on code in the master branch
+#![cfg_attr(feature="cargo-clippy", allow(clone_on_ref_ptr, needless_pass_by_value))]
 
 #[macro_use]
 extern crate log;
+#[macro_use]
+extern crate serde_derive;
 #[macro_use]
 extern crate unwrap;
 extern crate maidsafe_utilities;
@@ -43,9 +48,8 @@ extern crate serde_json;
 
 use clap::{App, AppSettings, Arg, SubCommand};
 
-use crust::{Config, ConnectionInfoResult, PeerId, PrivConnectionInfo, Service};
-use rand::Rng;
-use rand::random;
+use crust::{Config, ConnectionInfoResult, Uid};
+use rand::{Rand, Rng};
 use std::cmp;
 use std::collections::{BTreeMap, HashMap};
 use std::io;
@@ -55,10 +59,24 @@ use std::sync::mpsc::{RecvTimeoutError, Sender, channel};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, PartialEq, Ord, PartialOrd, Hash)]
+struct UniqueId([u8; 20]);
+impl Uid for UniqueId {}
+impl Rand for UniqueId {
+    fn rand<R: Rng>(rng: &mut R) -> Self {
+        let mut inner = [0; 20];
+        rng.fill_bytes(&mut inner);
+        UniqueId(inner)
+    }
+}
+
+type PrivConnectionInfo = crust::PrivConnectionInfo<UniqueId>;
+type Service = crust::Service<UniqueId>;
+
 fn generate_random_vec_u8(size: usize) -> Vec<u8> {
     let mut vec: Vec<u8> = Vec::with_capacity(size);
     for _ in 0..size {
-        vec.push(random::<u8>());
+        vec.push(rand::random::<u8>());
     }
     vec
 }
@@ -69,7 +87,7 @@ fn generate_random_vec_u8(size: usize) -> Vec<u8> {
 ///
 /// /////////////////////////////////////////////////////////////////////////////
 struct Network {
-    nodes: HashMap<usize, PeerId>,
+    nodes: HashMap<usize, UniqueId>,
     our_connection_infos: BTreeMap<u32, PrivConnectionInfo>,
     performance_start: Instant,
     performance_interval: Duration,
@@ -115,13 +133,13 @@ impl Network {
                 "Disconnected"
             };
 
-            println!("[{}] {} {}", id, status, node);
+            println!("[{}] {} {:?}", id, status, node);
         }
 
-        println!("");
+        println!();
     }
 
-    pub fn get_peer_id(&self, n: usize) -> Option<&PeerId> {
+    pub fn get_peer_id(&self, n: usize) -> Option<&UniqueId> {
         self.nodes.get(&n)
     }
 
@@ -132,10 +150,12 @@ impl Network {
             self.performance_start = Instant::now();
         }
         if self.performance_start + self.performance_interval < Instant::now() {
-            println!("\nReceived {} messages with total size of {} bytes in last {} seconds.",
-                     self.received_msgs,
-                     self.received_bytes,
-                     self.performance_interval.as_secs());
+            println!(
+                "\nReceived {} messages with total size of {} bytes in last {} seconds.",
+                self.received_msgs,
+                self.received_bytes,
+                self.performance_interval.as_secs()
+            );
             self.received_msgs = 0;
             self.received_bytes = 0;
         }
@@ -157,8 +177,10 @@ fn on_time_out(timeout: Duration, flag_speed: bool) -> Sender<bool> {
                     println!("Failed to connect to a peer.  Exiting.");
                     std::process::exit(3);
                 }
-                println!("Didn't bootstrap to an existing network - this may be the first node \
-                          of a new network.");
+                println!(
+                    "Didn't bootstrap to an existing network - this may be the first node \
+                          of a new network."
+                );
             }
         }
     });
@@ -166,10 +188,11 @@ fn on_time_out(timeout: Duration, flag_speed: bool) -> Sender<bool> {
     tx
 }
 
-fn handle_new_peer(service: &Service,
-                   protected_network: Arc<Mutex<Network>>,
-                   peer_id: PeerId)
-                   -> usize {
+fn handle_new_peer(
+    service: &Service,
+    protected_network: Arc<Mutex<Network>>,
+    peer_id: UniqueId,
+) -> usize {
     let mut network = unwrap!(protected_network.lock());
     let peer_index = network.next_peer_index();
     let _ = network.nodes.insert(peer_index, peer_id);
@@ -181,20 +204,28 @@ fn main() {
     unwrap!(maidsafe_utilities::log::init(true));
 
     let matches = App::new("crust_peer")
-        .about("The crust peer will run, using any config file it can find to \
-                try and bootstrap off any provided peers.")
-        .arg(Arg::with_name("discovery-port")
-                 .long("discovery-port")
-                 .value_name("PORT")
-                 .help("Set the port for local network service discovery")
-                 .takes_value(true))
-        .arg(Arg::with_name("speed")
-                 .short("s")
-                 .long("speed")
-                 .value_name("RATE")
-                 .help("Keep sending random data at a maximum speed of RATE bytes/second to the \
-                   first connected peer.")
-                 .takes_value(true))
+        .about(
+            "The crust peer will run, using any config file it can find to \
+                try and bootstrap off any provided peers.",
+        )
+        .arg(
+            Arg::with_name("discovery-port")
+                .long("discovery-port")
+                .value_name("PORT")
+                .help("Set the port for local network service discovery")
+                .takes_value(true),
+        )
+        .arg(
+            Arg::with_name("speed")
+                .short("s")
+                .long("speed")
+                .value_name("RATE")
+                .help(
+                    "Keep sending random data at a maximum speed of RATE bytes/second to the \
+                   first connected peer.",
+                )
+                .takes_value(true),
+        )
         .get_matches();
 
     // Construct Service and start listening
@@ -204,23 +235,29 @@ fn main() {
 
     let (bs_sender, bs_receiver) = channel();
     let crust_event_category = ::maidsafe_utilities::event_sender::MaidSafeEventCategory::Crust;
-    let event_sender =
-        ::maidsafe_utilities::event_sender::MaidSafeObserver::new(channel_sender,
-                                                                  crust_event_category,
-                                                                  category_tx);
+    let event_sender = ::maidsafe_utilities::event_sender::MaidSafeObserver::new(
+        channel_sender,
+        crust_event_category,
+        category_tx,
+    );
     // TODO {{{
     // let mut config = unwrap!(::crust::read_config_file());
     let mut config = Config::default();
     // }}}
 
     config.service_discovery_port = if matches.is_present("discovery-port") {
-        Some(unwrap!(unwrap!(matches.value_of("discovery-port"), "Expected <PORT>").parse(),
-                     "Expected number for <PORT>"))
+        Some(unwrap!(
+            unwrap!(
+                matches.value_of("discovery-port"),
+                "Expected <PORT>"
+            ).parse(),
+            "Expected number for <PORT>"
+        ))
     } else {
         None
     };
 
-    let mut service = unwrap!(Service::with_config(event_sender, config));
+    let mut service = unwrap!(Service::with_config(event_sender, config, rand::random()));
     unwrap!(service.start_listening_tcp());
     service.start_service_discovery();
     let service = Arc::new(Mutex::new(service));
@@ -250,18 +287,20 @@ fn main() {
                 ::maidsafe_utilities::event_sender::MaidSafeEventCategory::Crust => {
                     if let Ok(event) = channel_receiver.try_recv() {
                         match event {
-                            crust::Event::NewMessage(peer_id, bytes) => {
+                            crust::Event::NewMessage(peer_id, _, bytes) => {
                                 let message_length = bytes.len();
                                 let mut network = unwrap!(network2.lock());
                                 network.record_received(message_length);
-                                println!("\nReceived from {:?} message: {}",
-                                         peer_id,
-                                         String::from_utf8(bytes)
-                                             .unwrap_or(format!("non-UTF-8 message of {} bytes",
-                                                                message_length)));
+                                println!(
+                                    "\nReceived from {:?} message: {}",
+                                    peer_id,
+                                    String::from_utf8(bytes).unwrap_or_else(|_| {
+                                        format!("non-UTF-8 message of {} bytes", message_length)
+                                    })
+                                );
                             }
                             crust::Event::ConnectionInfoPrepared(result) => {
-                                let ConnectionInfoResult {
+                                let ConnectionInfoResult::<UniqueId> {
                                     result_token,
                                     result,
                                 } = result;
@@ -279,33 +318,42 @@ fn main() {
                                 println!("{}", info_json);
                                 let mut network = unwrap!(network2.lock());
                                 if network
-                                       .our_connection_infos
-                                       .insert(result_token, info)
-                                       .is_some() {
+                                    .our_connection_infos
+                                    .insert(result_token, info)
+                                    .is_some()
+                                {
                                     panic!("Got the same result_token twice!");
                                 };
                             }
                             crust::Event::BootstrapConnect(peer_id, addr) => {
-                                println!("\nBootstrapConnect with peer {:?} (address: <{:?}>)",
-                                         peer_id,
-                                         addr);
-                                let peer_index = handle_new_peer(&unwrap!(service.lock()),
-                                                                 network2.clone(),
-                                                                 peer_id);
+                                println!(
+                                    "\nBootstrapConnect with peer {:?} (address: <{:?}>)",
+                                    peer_id,
+                                    addr
+                                );
+                                let peer_index = handle_new_peer(
+                                    &unwrap!(service.lock()),
+                                    network2.clone(),
+                                    peer_id,
+                                );
                                 let _ = bs_sender.send(peer_index);
                             }
                             crust::Event::BootstrapAccept(peer_id, _) => {
                                 println!("\nBootstrapAccept with peer {:?}", peer_id);
-                                let peer_index = handle_new_peer(&unwrap!(service.lock()),
-                                                                 network2.clone(),
-                                                                 peer_id);
+                                let peer_index = handle_new_peer(
+                                    &unwrap!(service.lock()),
+                                    network2.clone(),
+                                    peer_id,
+                                );
                                 let _ = bs_sender.send(peer_index);
                             }
                             crust::Event::ConnectSuccess(peer_id) => {
                                 println!("\nConnected to peer {:?}", peer_id);
-                                let _ = handle_new_peer(&unwrap!(service.lock()),
-                                                        network2.clone(),
-                                                        peer_id);
+                                let _ = handle_new_peer(
+                                    &unwrap!(service.lock()),
+                                    network2.clone(),
+                                    peer_id,
+                                );
                             }
                             crust::Event::LostPeer(peer_id) => {
                                 println!("\nLost connection to peer {:?}", peer_id);
@@ -321,8 +369,10 @@ fn main() {
                                 }
                                 let mut network = unwrap!(network2.lock());
                                 if let Some(index) = index {
-                                    let _ = unwrap!(network.nodes.remove(&index),
-                                                    "index should definitely be a key in this map");
+                                    let _ = unwrap!(
+                                        network.nodes.remove(&index),
+                                        "index should definitely be a key in this map"
+                                    );
                                 };
                                 network.print_connected_nodes(&unwrap!(service.lock()));
                             }
@@ -345,12 +395,10 @@ fn main() {
         let tx = on_time_out(Duration::from_secs(5), running_speed_test);
 
         // Block until we get one bootstrap connection
-        let peer_index = bs_receiver
-            .recv()
-            .unwrap_or_else(|e| {
-                                println!("CrustNode event handler closed; error : {}", e);
-                                std::process::exit(6);
-                            });
+        let peer_index = bs_receiver.recv().unwrap_or_else(|e| {
+            println!("CrustNode event handler closed; error : {}", e);
+            std::process::exit(6);
+        });
         let network = unwrap!(network.lock());
         let peer_id = unwrap!(network.get_peer_id(peer_index), "No such peer index");
 
@@ -359,24 +407,33 @@ fn main() {
         let _ = tx.send(true); // stop timer with no error messages
 
         thread::sleep(Duration::from_millis(100));
-        println!("");
+        println!();
 
-        let speed: u64 = unwrap!(unwrap!(matches.value_of("speed"),
-                                         "Safe due to `running_speed_test` == true")
-                                         .parse(),
-                                 "Expected number for <speed>");
+        let speed: u64 = unwrap!(
+            unwrap!(
+                matches.value_of("speed"),
+                "Safe due to `running_speed_test` == true"
+            ).parse(),
+            "Expected number for <speed>"
+        );
         let mut rng = rand::thread_rng();
         loop {
             let length = rng.gen_range(50, speed);
             let times = cmp::max(1, speed / length);
             let sleep_time = cmp::max(1, 1000 / times);
             for _ in 0..times {
-                unwrap!(unwrap!(service.lock()).send(peer_id.clone(),
-                                                     generate_random_vec_u8(length as usize),
-                                                     0));
-                debug!("Sent a message with length of {} bytes to {:?}",
-                       length,
-                       peer_id);
+                unwrap!(unwrap!(service.lock()).send(
+                    peer_id,
+                    generate_random_vec_u8(
+                        length as usize,
+                    ),
+                    0,
+                ));
+                debug!(
+                    "Sent a message with length of {} bytes to {:?}",
+                    length,
+                    peer_id
+                );
                 std::thread::sleep(Duration::from_millis(sleep_time));
             }
         }
@@ -431,9 +488,11 @@ fn main() {
                     let network = unwrap!(network.lock());
                     match network.get_peer_id(peer_index) {
                         Some(ref mut peer_id) => {
-                            unwrap!(unwrap!(service.lock()).send(peer_id.clone(),
-                                                                 message.into_bytes(),
-                                                                 0));
+                            unwrap!(unwrap!(service.lock()).send(
+                                *peer_id,
+                                message.into_bytes(),
+                                0,
+                            ));
                         }
                         None => println!("Invalid connection #"),
                     }
@@ -442,7 +501,7 @@ fn main() {
                     let mut network = unwrap!(network.lock());
                     let msg = message.into_bytes();
                     for peer_id in network.nodes.values_mut() {
-                        unwrap!(unwrap!(service.lock()).send(*peer_id, msg.clone(), 0));
+                        unwrap!(unwrap!(service.lock()).send(peer_id, msg.clone(), 0));
                     }
                 }
                 UserCommand::List => {
@@ -473,44 +532,64 @@ enum UserCommand {
 fn parse_user_command(cmd: &str) -> Option<UserCommand> {
     let app = App::new("cli")
         .setting(AppSettings::NoBinaryName)
-        .subcommand(SubCommand::with_name("prepare-connection-info")
-            .about("Prepare a connection info"))
-        .subcommand(SubCommand::with_name("connect")
-            .about("Initiate a connection to the remote peer")
-            .arg(Arg::with_name("our-info-id")
-                .help("The ID of the connection info we gave to the peer")
-                .required(true)
-                .index(1))
-            .arg(Arg::with_name("their-info")
-                .help("The connection info received from the peer")
-                .required(true)
-                .index(2)))
-        .subcommand(SubCommand::with_name("send")
-            .about("Send a string to the given peer")
-            .arg(Arg::with_name("peer")
-                .help("ID of a connection as listed using the `list` command")
-                .required(true)
-                .index(1))
-            .arg(Arg::with_name("message")
-                .help("The text to send to the peer(s)")
-                .required(true)
-                .index(2)))
-        .subcommand(SubCommand::with_name("send-all")
-            .about("Send a string to all connections")
-            .arg(Arg::with_name("message")
-                .help("The text to send to the peer(s)")
-                .required(true)
-                .index(1)))
-        .subcommand(SubCommand::with_name("list")
-            .about("List existing connections and UDP sockets"))
+        .subcommand(SubCommand::with_name("prepare-connection-info").about(
+            "Prepare a connection info",
+        ))
+        .subcommand(
+            SubCommand::with_name("connect")
+                .about("Initiate a connection to the remote peer")
+                .arg(
+                    Arg::with_name("our-info-id")
+                        .help("The ID of the connection info we gave to the peer")
+                        .required(true)
+                        .index(1),
+                )
+                .arg(
+                    Arg::with_name("their-info")
+                        .help("The connection info received from the peer")
+                        .required(true)
+                        .index(2),
+                ),
+        )
+        .subcommand(
+            SubCommand::with_name("send")
+                .about("Send a string to the given peer")
+                .arg(
+                    Arg::with_name("peer")
+                        .help("ID of a connection as listed using the `list` command")
+                        .required(true)
+                        .index(1),
+                )
+                .arg(
+                    Arg::with_name("message")
+                        .help("The text to send to the peer(s)")
+                        .required(true)
+                        .index(2),
+                ),
+        )
+        .subcommand(
+            SubCommand::with_name("send-all")
+                .about("Send a string to all connections")
+                .arg(
+                    Arg::with_name("message")
+                        .help("The text to send to the peer(s)")
+                        .required(true)
+                        .index(1),
+                ),
+        )
+        .subcommand(SubCommand::with_name("list").about(
+            "List existing connections and UDP sockets",
+        ))
         .subcommand(SubCommand::with_name("stop").about("Exit the app"))
         .subcommand(SubCommand::with_name("help").about("Print this help"));
     let mut help_message = Vec::new();
     unwrap!(app.write_help(&mut help_message));
     let help_message = unwrap!(String::from_utf8(help_message));
-    let matches = app.get_matches_from_safe(cmd.trim_right_matches(|c| c == '\r' || c == '\n')
-                                                .split(' ')
-                                                .collect::<Vec<_>>());
+    let matches = app.get_matches_from_safe(
+        cmd.trim_right_matches(|c| c == '\r' || c == '\n')
+            .split(' ')
+            .collect::<Vec<_>>(),
+    );
 
     let matches = match matches {
         Ok(v) => v,
@@ -524,11 +603,16 @@ fn parse_user_command(cmd: &str) -> Option<UserCommand> {
         let matches = unwrap!(matches.subcommand_matches("connect"));
         let our_info_id = unwrap!(matches.value_of("our-info-id"), "Missing our_info_id");
         let their_info = unwrap!(matches.value_of("their-info"), "Missing their_info");
-        Some(UserCommand::Connect(our_info_id.to_string(), their_info.to_string()))
+        Some(UserCommand::Connect(
+            our_info_id.to_string(),
+            their_info.to_string(),
+        ))
     } else if matches.is_present("send") {
         let matches = unwrap!(matches.subcommand_matches("send"));
-        let peer: usize = unwrap!(unwrap!(matches.value_of("peer"), "Missing peer").parse(),
-                                  "expected number for <peer>");
+        let peer: usize = unwrap!(
+            unwrap!(matches.value_of("peer"), "Missing peer").parse(),
+            "expected number for <peer>"
+        );
         let msg = unwrap!(matches.value_of("message"), "Missing message");
         Some(UserCommand::Send(peer, msg.to_string()))
     } else if matches.is_present("send-all") {

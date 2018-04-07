@@ -23,7 +23,7 @@ use std::net::{IpAddr, SocketAddr};
 #[cfg(test)]
 use std::path::PathBuf;
 
-/// Bootstrap config
+/// Crust configuration settings
 #[derive(PartialEq, Eq, Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
     /// Direct contacts one should connect to
@@ -45,13 +45,24 @@ pub struct Config {
     pub service_discovery_port: Option<u16>,
     /// File for bootstrap cache
     pub bootstrap_cache_name: Option<String>,
-    /// Bootstrap whitelisted IPs
-    pub bootstrap_whitelisted_ips: HashSet<IpAddr>,
+    /// Whitelisted nodes who are allowed to bootstrap off us or to connect to us
+    pub whitelisted_node_ips: Option<HashSet<IpAddr>>,
+    /// Whitelisted clients who are allowed to bootstrap off us
+    pub whitelisted_client_ips: Option<HashSet<IpAddr>>,
     /// Network ID
     ///
     /// This is a mechanism to prevent nodes from different decentralized
     /// networks to connect to each other (issue #209)
     pub network_name: Option<String>,
+    /// Optional developer configuration
+    pub dev: Option<DevConfig>,
+}
+
+/// Developer options
+#[derive(PartialEq, Eq, Debug, Serialize, Deserialize, Clone, Default)]
+pub struct DevConfig {
+    /// If `true`, then the mandatory external reachability test is disabled.
+    pub disable_external_reachability_requirement: bool,
 }
 
 impl Default for Config {
@@ -62,8 +73,10 @@ impl Default for Config {
             force_acceptor_port_in_ext_ep: false,
             service_discovery_port: None,
             bootstrap_cache_name: None,
-            bootstrap_whitelisted_ips: HashSet::new(),
+            whitelisted_node_ips: None,
+            whitelisted_client_ips: None,
             network_name: None,
+            dev: None,
         }
     }
 }
@@ -97,9 +110,11 @@ pub fn write_config_file(hard_coded_contacts: Option<Vec<SocketAddr>>) -> ::Res<
     let mut config_path = config_file_handler::current_bin_dir()?;
     config_path.push(get_file_name()?);
     let mut file = ::std::fs::File::create(&config_path)?;
-    write!(&mut file,
-           "{}",
-           unwrap!(serde_json::to_string_pretty(&config)))?;
+    write!(
+        &mut file,
+        "{}",
+        unwrap!(serde_json::to_string_pretty(&config))
+    )?;
     file.sync_all()?;
     Ok(config_path)
 }
@@ -123,9 +138,7 @@ mod tests {
 
         let mut file = match ::std::fs::File::open(path) {
             Ok(file) => file,
-            Err(what) => {
-                panic!(format!("CrustError opening sample.config: {:?}", what));
-            }
+            Err(what) => panic!(format!("CrustError opening sample.config: {:?}", what)),
         };
 
         let mut encoded_contents = String::new();

@@ -16,7 +16,7 @@
 // relating to use of the SAFE Network Software.
 
 use self::get_ext_addr::GetExtAddr;
-use common::{Core, CoreMessage, CoreTimer, State};
+use common::{Core, CoreMessage, CoreTimer, State, Uid};
 use igd::PortMappingProtocol;
 use maidsafe_utilities::thread;
 use mio::{Poll, Token};
@@ -26,6 +26,7 @@ use net2::TcpBuilder;
 use std::any::Any;
 use std::cell::RefCell;
 use std::collections::HashSet;
+use std::marker::PhantomData;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::rc::Rc;
 use std::time::Duration;
@@ -35,7 +36,7 @@ mod get_ext_addr;
 const TIMEOUT_SEC: u64 = 3;
 
 /// A state which represents the in-progress mapping of a tcp socket.
-pub struct MappedTcpSocket<F> {
+pub struct MappedTcpSocket<F, UID> {
     token: Token,
     socket: Option<TcpBuilder>,
     igd_children: usize,
@@ -43,18 +44,22 @@ pub struct MappedTcpSocket<F> {
     mapped_addrs: Vec<SocketAddr>,
     timeout: Timeout,
     finish: Option<F>,
+    phantom: PhantomData<UID>,
 }
 
-impl<F> MappedTcpSocket<F>
-    where F: FnOnce(&mut Core, &Poll, TcpBuilder, Vec<SocketAddr>) + Any
+impl<F, UID> MappedTcpSocket<F, UID>
+where
+    F: FnOnce(&mut Core, &Poll, TcpBuilder, Vec<SocketAddr>) + Any,
+    UID: Uid,
 {
     /// Start mapping a tcp socket
-    pub fn start(core: &mut Core,
-                 poll: &Poll,
-                 port: u16,
-                 mc: &MappingContext,
-                 finish: F)
-                 -> Result<(), NatError> {
+    pub fn start(
+        core: &mut Core,
+        poll: &Poll,
+        port: u16,
+        mc: &MappingContext,
+        finish: F,
+    ) -> Result<(), NatError> {
         let token = core.get_new_token();
 
         // TODO(Spandan) Ipv6 is not supported in Listener so dealing only with ipv4 right now
@@ -87,7 +92,7 @@ impl<F> MappedTcpSocket<F>
 
                     let mut state = state.borrow_mut();
                     let mapping_tcp_sock =
-                        match state.as_any().downcast_mut::<MappedTcpSocket<F>>() {
+                        match state.as_any().downcast_mut::<MappedTcpSocket<F, UID>>() {
                             Some(mapping_sock) => mapping_sock,
                             None => return,
                         };
@@ -102,36 +107,42 @@ impl<F> MappedTcpSocket<F>
             .map(|&(ip, _)| SocketAddr::new(IpAddr::V4(ip), addr.port()))
             .collect();
 
-        let state =
-            Rc::new(RefCell::new(MappedTcpSocket {
-                                     token: token,
-                                     socket: Some(socket),
-                                     igd_children: igd_children,
-                                     stun_children: HashSet::with_capacity(mc.peer_stuns().len()),
-                                     mapped_addrs: mapped_addrs,
-                                     timeout: core.set_timeout(Duration::from_secs(TIMEOUT_SEC),
-                                                               CoreTimer::new(token, 0))?,
-                                     finish: Some(finish),
-                                 }));
+        let state = Rc::new(RefCell::new(Self {
+            token: token,
+            socket: Some(socket),
+            igd_children: igd_children,
+            stun_children: HashSet::with_capacity(mc.peer_stuns().len()),
+            mapped_addrs: mapped_addrs,
+            timeout: core.set_timeout(
+                Duration::from_secs(TIMEOUT_SEC),
+                CoreTimer::new(token, 0),
+            )?,
+            finish: Some(finish),
+            phantom: PhantomData,
+        }));
 
         // Ask Stuns
         for stun in mc.peer_stuns() {
             let self_weak = Rc::downgrade(&state);
             let handler = move |core: &mut Core, poll: &Poll, child_token, res| {
                 if let Some(self_rc) = self_weak.upgrade() {
-                    self_rc
-                        .borrow_mut()
-                        .handle_stun_resp(core, poll, child_token, res)
+                    self_rc.borrow_mut().handle_stun_resp(
+                        core,
+                        poll,
+                        child_token,
+                        res,
+                    )
                 }
             };
 
-            if let Ok(child) = GetExtAddr::start(core, poll, addr, stun, Box::new(handler)) {
+            if let Ok(child) = GetExtAddr::<UID>::start(core, poll, addr, stun, Box::new(handler)) {
                 let _ = state.borrow_mut().stun_children.insert(child);
             }
         }
 
         if state.borrow().stun_children.is_empty() && state.borrow().igd_children == 0 {
-            return Ok(state.borrow_mut().terminate(core, poll));
+            state.borrow_mut().terminate(core, poll);
+            return Ok(());
         }
 
         let _ = core.insert_state(token, state);
@@ -139,11 +150,13 @@ impl<F> MappedTcpSocket<F>
         Ok(())
     }
 
-    fn handle_stun_resp(&mut self,
-                        core: &mut Core,
-                        poll: &Poll,
-                        child: Token,
-                        res: Result<SocketAddr, ()>) {
+    fn handle_stun_resp(
+        &mut self,
+        core: &mut Core,
+        poll: &Poll,
+        child: Token,
+        res: Result<SocketAddr, ()>,
+    ) {
         let _ = self.stun_children.remove(&child);
         if let Ok(our_ext_addr) = res {
             self.mapped_addrs.push(our_ext_addr);
@@ -173,8 +186,11 @@ impl<F> MappedTcpSocket<F>
     }
 }
 
-impl<F> State for MappedTcpSocket<F>
-    where F: FnOnce(&mut Core, &Poll, TcpBuilder, Vec<SocketAddr>) + Any
+impl<F, UID> State for MappedTcpSocket<F, UID>
+where
+    F: FnOnce(&mut Core, &Poll, TcpBuilder, Vec<SocketAddr>)
+        + Any,
+    UID: Uid,
 {
     fn timeout(&mut self, core: &mut Core, poll: &Poll, _: u8) {
         self.terminate(core, poll)

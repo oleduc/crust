@@ -1,5 +1,41 @@
 # CRUST - Change Log
 
+## [0.30.0]
+- Use rust 1.22.1 stable / 2017-11-23 nightly
+- rustfmt 0.9.0 and clippy-0.0.174
+
+## [0.29.0]
+- Replace `get_if_addrs` module with crate of the same name and fix build issues on mobile platforms.
+
+## [0.28.1]
+- Call shutdown() on sockets before dropping them because this fixes a bug under windows.
+
+## [0.28.0]
+- Use rust 1.19 stable / 2017-07-20 nightly
+- rustfmt 0.9.0 and clippy-0.0.144
+- Replace -Zno-trans with cargo check
+- Make appveyor script using fixed version of stable
+- Add dev config option
+- Avoid dropping unexpired messages unnecessarily
+
+## [0.27.0]
+- Crust handles the whitelist completely by itself instead of delegating it to the upper layers.
+- Config file expanded to cover the cases for node and client whitelists separately.
+
+## [0.26.0]
+- Deny bootstrapping off us until explicitly allowed.
+
+## [0.25.0]
+- Crust is now templatised on a Uid
+- Replace rust_sodium sha256 with tiny-keccak sha3_256
+- Rustfmt 0.8.3 and clippy 0.0.128.
+- Rust stable 1.17
+
+## [0.24.0]
+- Update to mio-v0.6.6
+- Switch from rustc-serialize to serde
+- Remove module containing custom SocketAddr and IpAddr and use `std::net` equivalents with serde
+
 ## [0.23.0]
 - Indicate to the crust user if the remote crust trying to bootstrap off us presents itself as a `CrustUser::Client` (in which case external reacheability check will be subverted) or a `CrustUser::Node` (in which case external reacheability check will be mandated).
 

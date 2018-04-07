@@ -34,14 +34,19 @@
         unused_attributes, unused_comparisons, unused_features, unused_parens, while_true)]
 #![warn(trivial_casts, trivial_numeric_casts, unused_extern_crates, unused_import_braces,
         unused_qualifications, unused_results)]
-#![allow(box_pointers, fat_ptr_transmutes, missing_copy_implementations,
+#![allow(box_pointers, missing_copy_implementations,
          missing_debug_implementations, variant_size_differences)]
 
-#![cfg_attr(feature="cargo-clippy", allow(too_many_arguments))]
+// FIXME: `needless_pass_by_value` and `clone_on_ref_ptr` required to make no intrusive changes
+// on code in the master branch
+#![cfg_attr(feature="cargo-clippy", allow(clone_on_ref_ptr, decimal_literal_representation,
+                                          needless_pass_by_value, too_many_arguments))]
+// TODO FIXME Remove this soon
+#![allow(deprecated)]
 
 #[macro_use]
 extern crate log;
-#[cfg_attr(feature="cargo-clippy", allow(useless_attribute))]
+#[cfg_attr(feature = "cargo-clippy", allow(useless_attribute))]
 #[macro_use]
 extern crate quick_error;
 #[macro_use]
@@ -50,20 +55,17 @@ extern crate serde_derive;
 extern crate unwrap;
 
 extern crate byteorder;
-extern crate c_linked_list;
 extern crate config_file_handler;
 extern crate crossbeam;
 extern crate igd;
-extern crate libc;
 extern crate maidsafe_utilities;
 extern crate mio;
 extern crate net2;
 extern crate rand;
 extern crate rust_sodium;
 extern crate serde;
-
-#[cfg(windows)]
-extern crate winapi;
+extern crate tiny_keccak;
+extern crate get_if_addrs;
 
 #[cfg(test)]
 extern crate serde_json;
@@ -76,11 +78,11 @@ mod common;
 mod service_discovery;
 mod nat;
 
-pub use common::{CrustUser, MSG_DROP_PRIORITY, Priority};
-pub use main::{Config, ConnectionInfoResult, CrustError, Event, PeerId, PrivConnectionInfo,
-               PubConnectionInfo, Service};
+pub use common::{CrustUser, MSG_DROP_PRIORITY, Priority, Uid};
+pub use main::{Config, ConnectionInfoResult, CrustError, Event, PrivConnectionInfo,
+               PubConnectionInfo, Service, read_config_file};
 
 /// Used to receive events from a `Service`.
-pub type CrustEventSender = ::maidsafe_utilities::event_sender::MaidSafeObserver<Event>;
+pub type CrustEventSender<UID> = ::maidsafe_utilities::event_sender::MaidSafeObserver<Event<UID>>;
 /// Crust's result type
 pub type Res<T> = Result<T, CrustError>;

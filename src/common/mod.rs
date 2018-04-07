@@ -20,10 +20,14 @@ pub use self::error::CommonError;
 pub use self::message::{BootstrapDenyReason, Message};
 pub use self::socket::Socket;
 pub use self::state::State;
-use rust_sodium::crypto::hash::sha256;
+use serde::de::DeserializeOwned;
+use serde::ser::Serialize;
+use std::fmt;
+use std::hash::Hash;
 use std::net::SocketAddr;
 
-pub type NameHash = [u8; sha256::DIGESTBYTES];
+pub const HASH_SIZE: usize = 32;
+pub type NameHash = [u8; HASH_SIZE];
 /// Priority of a message to be sent by Crust. A lower value means a higher priority, so Priority 0
 /// is the highest one. Low-priority messages will be preempted if need be to allow higher priority
 /// messages through. Messages with a value `>= MSG_DROP_PRIORITY` will even be dropped, if
@@ -54,7 +58,22 @@ pub enum ExternalReachability {
     Required { direct_listeners: Vec<SocketAddr> },
 }
 
-pub mod get_if_addrs;
+/// Trait for specifying a unique identifier for a Crust peer
+pub trait Uid
+    : 'static
+    + Send
+    + fmt::Debug
+    + Clone
+    + Copy
+    + Eq
+    + PartialEq
+    + Ord
+    + PartialOrd
+    + Hash
+    + Serialize
+    + DeserializeOwned {
+}
+
 mod core;
 mod error;
 mod message;
